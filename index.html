@@ -89,14 +89,14 @@
       paint(rows);
       targetEl.textContent = "finding…";
       try {
-        const list = await getJson("https://atlas.ripe.net/api/v2/measurements/?status=4&type=ping&page_size=1&ordering=-id");
+        const list = await getJson("https://atlas.ripe.net/api/v2/measurements/?status=4&type=ping&page_size=1&sort=-id");
         const packet = (list.results || [])[0];
         if (!packet) throw new Error("no public ping");
         rows.push(stamp("find", { source: "ripe-atlas", id: packet.id, target: packet.target, description: packet.description, status: packet.status && packet.status.name }));
         targetEl.textContent = packet.target;
         metaEl.textContent = "#" + packet.id + " · " + (packet.description || "ping");
         const t0 = performance.now();
-        const results = await getJson("https://atlas.ripe.net/api/v2/measurements/" + packet.id + "/results/?format=json");
+        const results = await getJson("https://atlas.ripe.net/api/v2/measurements/" + packet.id + "/latest/?format=json");
         const rtt = Math.round(performance.now() - t0);
         const samples = [];
         (Array.isArray(results) ? results : []).forEach(item => {
