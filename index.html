@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Last packet</title>
+  <style>
+    :root { color-scheme: light; --ink:#1c1917; --muted:#78716c; --line:#e7e5e4; --paper:#fafaf9; --card:#fff; --accent:#9a3412; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.45 ui-sans-serif, system-ui, sans-serif; color: var(--ink); background: var(--paper); }
+    header, main { max-width: 760px; margin: 0 auto; padding: 16px; }
+    header { display: flex; justify-content: space-between; gap: 12px; align-items: end; border-bottom: 1px solid var(--line); }
+    h1 { font-size: 28px; margin: 0; }
+    p { margin: 4px 0 0; color: var(--muted); }
+    button { background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 12px 14px; font-weight: 700; }
+    button.ghost { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-top: 12px; }
+    .card h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .big { font-size: 22px; font-weight: 700; }
+    .meta { color: var(--muted); font-size: 14px; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { border-top: 1px solid var(--line); padding: 10px 0; font-size: 14px; }
+    .kind { font-weight: 800; color: var(--accent); margin-right: 6px; }
+    .err { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Last packet</h1>
+      <p>Finds the newest public ping and logs every return.</p>
+    </div>
+    <div class="row">
+      <button id="run" type="button">Run</button>
+      <button id="save" class="ghost" type="button">Download log</button>
+    </div>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Last public packet</h2>
+      <div class="big" id="target">waiting</div>
+      <div class="meta" id="meta"></div>
+    </section>
+    <section class="card">
+      <h2>Heard echo</h2>
+      <div class="big" id="echo">—</div>
+      <div class="meta" id="correction"></div>
+    </section>
+    <section class="card">
+      <h2>Log</h2>
+      <ul id="log"></ul>
+    </section>
+  </main>
+  <script>
+    const KEY = "last-packet-log";
+    const targetEl = document.getElementById("target");
+    const metaEl = document.getElementById("meta");
+    const echoEl = document.getElementById("echo");
+    const correctionEl = document.getElementById("correction");
+    const logEl = document.getElementById("log");
+
+    function load() {
+      try { return JSON.parse(localStorage.getItem(KEY) || "[]"); }
+      catch { return []; }
+    }
+    function save(rows) {
+      localStorage.setItem(KEY, JSON.stringify(rows.slice(-200)));
+    }
+    function stamp(kind, extra) {
+      return Object.assign({ kind, at: new Date().toISOString() }, extra);
+    }
+    function paint(rows) {
+      logEl.innerHTML = rows.slice().reverse().map(row =>
+        `<li><span class="kind">${row.kind}</span>${escape(JSON.stringify(row))}</li>`
+      ).join("");
+    }
+    function escape(s) {
+      return s.replace(/[&<>]/g, c => ({ "&": "&", "<": "<", ">": ">" }[c]));
+    }
+    async function getJson(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.status + " " + url);
+      return res.json();
+    }
+    async function run() {
+      const rows = load();
+      rows.push(stamp("path", { intent: "find newest stopped public ping, then hear its results" }));
+      paint(rows);
+      targetEl.textContent = "finding…";
+      try {
+        const list = await getJson("https://atlas.ripe.net/api/v2/measurements/?status=4&type=ping&page_size=1&ordering=-id");
+        const packet = (list.results || [])[0];
+        if (!packet) throw new Error("no public ping");
+        rows.push(stamp("find", { source: "ripe-atlas", id: packet.id, target: packet.target, description: packet.description, status: packet.status && packet.status.name }));
+        targetEl.textContent = packet.target;
+        metaEl.textContent = "#" + packet.id + " · " + (packet.description || "ping");
+        const t0 = performance.now();
+        const results = await getJson("https://atlas.ripe.net/api/v2/measurements/" + packet.id + "/results/?format=json");
+        const rtt = Math.round(performance.now() - t0);
+        const samples = [];
+        (Array.isArray(results) ? results : []).forEach(item => {
+          (item.result || []).forEach(res => { if (res.rtt != null) samples.push(res.rtt); });
+        });
+        samples.sort((a, b) => a - b);
+        const heard = {
+          probes: Array.isArray(results) ? results.length : 0,
+          samples: samples.length,
+          fetch_ms: rtt,
+          rtt_min: samples[0],
+          rtt_med: samples[Math.floor(samples.length / 2)],
+          rtt_max: samples[samples.length - 1]
+        };
+        rows.push(stamp("hear", Object.assign({ id: packet.id, target: packet.target }, heard)));
+        const note = samples.length ? "ping echo held" : "measurement found, no RTT samples yet";
+        rows.push(stamp("correct", { note, target: packet.target }));
+        echoEl.textContent = samples.length ? heard.rtt_med.toFixed(1) + " ms median" : "no samples";
+        correctionEl.textContent = note + (samples.length ? " · " + heard.samples + " samples · fetch " + rtt + " ms" : "");
+      } catch (err) {
+        rows.push(stamp("error", { detail: String(err) }));
+        targetEl.textContent = "find failed";
+        echoEl.textContent = "—";
+        correctionEl.innerHTML = `<span class="err">${escape(String(err))}</span>`;
+      }
+      save(rows);
+      paint(rows);
+    }
+    document.getElementById("run").onclick = run;
+    document.getElementById("save").onclick = () => {
+      const lines = load().map(row => JSON.stringify(row)).join("\n") + "\n";
+      const blob = new Blob([lines], { type: "application/x-ndjson" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "finds.jsonl";
+      a.click();
+    };
+    paint(load());
+    run();
+  </script>
+</body>
+</html>
